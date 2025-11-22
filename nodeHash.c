@@ -371,24 +371,19 @@ ExecChooseHashTableSize(double ntuples, int tupwidth,
 	 * Set nbuckets to achieve an average bucket load of NTUP_PER_BUCKET when
 	 * memory is filled.  Set nbatch to the smallest power of 2 that appears
 	 * sufficient.
+	 * (hybrid hash join). For CSI3130, we disable multiple batches
 	 */
+
 	if (inner_rel_bytes > hash_table_bytes)
 	{
 		/* We'll need multiple batches */
 		long		lbuckets;
-		double		dbatch;
-		int			minbatch;
-
+		/* CSI3130: Even if the table is large, we will still force a sinle batch */
+		
 		lbuckets = (hash_table_bytes / tupsize) / NTUP_PER_BUCKET;
 		lbuckets = Min(lbuckets, INT_MAX);
 		nbuckets = (int) lbuckets;
-
-		dbatch = ceil(inner_rel_bytes / hash_table_bytes);
-		dbatch = Min(dbatch, INT_MAX / 2);
-		minbatch = (int) dbatch;
-		nbatch = 2;
-		while (nbatch < minbatch)
-			nbatch <<= 1;
+        
 	}
 	else
 	{
@@ -398,8 +393,6 @@ ExecChooseHashTableSize(double ntuples, int tupwidth,
 		dbuckets = ceil(ntuples / NTUP_PER_BUCKET);
 		dbuckets = Min(dbuckets, INT_MAX);
 		nbuckets = (int) dbuckets;
-
-		nbatch = 1;
 	}
 
 	/*
@@ -419,6 +412,9 @@ ExecChooseHashTableSize(double ntuples, int tupwidth,
 	}
 
 	*numbuckets = nbuckets;
+
+	/* CSI3130: Disable multiple batches by forcing exactly one batch */
+	nbatch = 1;
 	*numbatches = nbatch;
 }
 
@@ -432,20 +428,9 @@ ExecChooseHashTableSize(double ntuples, int tupwidth,
 void
 ExecHashTableDestroy(HashJoinTable hashtable)
 {
-	int			i;
-
-	/*
-	 * Make sure all the temp files are closed.  We skip batch 0, since it
-	 * can't have any temp files (and the arrays might not even exist if
-	 * nbatch is only 1).
+	/* CSI3130: batching disabled – no temp batch files to close here.
+	 * nbatch is always 1 and innerBatchFile/outerBatchFile remain NULL.
 	 */
-	for (i = 1; i < hashtable->nbatch; i++)
-	{
-		if (hashtable->innerBatchFile[i])
-			BufFileClose(hashtable->innerBatchFile[i]);
-		if (hashtable->outerBatchFile[i])
-			BufFileClose(hashtable->outerBatchFile[i]);
-	}
 
 	/* Release working memory (batchCxt is a child, so it goes away too) */
 	MemoryContextDelete(hashtable->hashCxt);
@@ -454,144 +439,24 @@ ExecHashTableDestroy(HashJoinTable hashtable)
 	pfree(hashtable);
 }
 
-/*
+/* ----------------------------------------------------------------
  * ExecHashIncreaseNumBatches
- *		increase the original number of batches in order to reduce
- *		current memory consumption
+ *
+ * CSI3130: Batching disabled.
+ * PostgreSQL normally increases the number of batches when the hash
+ * table grows too large. For this assignment, we assume the entire
+ * hash table fits in memory and we never create additional batches.
+ * Therefore, this function is now an intentional no-op.
+ * ----------------------------------------------------------------
  */
 static void
 ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 {
-	int			oldnbatch = hashtable->nbatch;
-	int			curbatch = hashtable->curbatch;
-	int			nbatch;
-	int			i;
-	MemoryContext oldcxt;
-	long		ninmemory;
-	long		nfreed;
-
-	/* do nothing if we've decided to shut off growth */
-	if (!hashtable->growEnabled)
-		return;
-
-	/* safety check to avoid overflow */
-	if (oldnbatch > INT_MAX / 2)
-		return;
-
-	nbatch = oldnbatch * 2;
-	Assert(nbatch > 1);
-
-#ifdef HJDEBUG
-	printf("Increasing nbatch to %d because space = %lu\n",
-		   nbatch, (unsigned long) hashtable->spaceUsed);
-#endif
-
-	oldcxt = MemoryContextSwitchTo(hashtable->hashCxt);
-
-	if (hashtable->innerBatchFile == NULL)
-	{
-		/* we had no file arrays before */
-		hashtable->innerBatchFile = (BufFile **)
-			palloc0(nbatch * sizeof(BufFile *));
-		hashtable->outerBatchFile = (BufFile **)
-			palloc0(nbatch * sizeof(BufFile *));
-	}
-	else
-	{
-		/* enlarge arrays and zero out added entries */
-		hashtable->innerBatchFile = (BufFile **)
-			repalloc(hashtable->innerBatchFile, nbatch * sizeof(BufFile *));
-		hashtable->outerBatchFile = (BufFile **)
-			repalloc(hashtable->outerBatchFile, nbatch * sizeof(BufFile *));
-		MemSet(hashtable->innerBatchFile + oldnbatch, 0,
-			   (nbatch - oldnbatch) * sizeof(BufFile *));
-		MemSet(hashtable->outerBatchFile + oldnbatch, 0,
-			   (nbatch - oldnbatch) * sizeof(BufFile *));
-	}
-
-	MemoryContextSwitchTo(oldcxt);
-
-	hashtable->nbatch = nbatch;
-
-	/*
-	 * Scan through the existing hash table entries and dump out any that are
-	 * no longer of the current batch.
-	 */
-	ninmemory = nfreed = 0;
-
-	for (i = 0; i < hashtable->nbuckets; i++)
-	{
-		HashJoinTuple prevtuple;
-		HashJoinTuple tuple;
-
-		prevtuple = NULL;
-		tuple = hashtable->buckets[i];
-
-		while (tuple != NULL)
-		{
-			/* save link in case we delete */
-			HashJoinTuple nexttuple = tuple->next;
-			int			bucketno;
-			int			batchno;
-
-			ninmemory++;
-			ExecHashGetBucketAndBatch(hashtable, tuple->hashvalue,
-									  &bucketno, &batchno);
-			Assert(bucketno == i);
-			if (batchno == curbatch)
-			{
-				/* keep tuple */
-				prevtuple = tuple;
-			}
-			else
-			{
-				/* dump it out */
-				Assert(batchno > curbatch);
-				ExecHashJoinSaveTuple(&tuple->htup, tuple->hashvalue,
-									  &hashtable->innerBatchFile[batchno]);
-				/* and remove from hash table */
-				if (prevtuple)
-					prevtuple->next = nexttuple;
-				else
-					hashtable->buckets[i] = nexttuple;
-				/* prevtuple doesn't change */
-				hashtable->spaceUsed -=
-					MAXALIGN(sizeof(HashJoinTupleData)) + tuple->htup.t_len;
-				pfree(tuple);
-				nfreed++;
-			}
-
-			tuple = nexttuple;
-		}
-	}
-
-#ifdef HJDEBUG
-	printf("Freed %ld of %ld tuples, space now %lu\n",
-		   nfreed, ninmemory, (unsigned long) hashtable->spaceUsed);
-#endif
-
-	/*
-	 * If we dumped out either all or none of the tuples in the table, disable
-	 * further expansion of nbatch.  This situation implies that we have
-	 * enough tuples of identical hashvalues to overflow spaceAllowed.
-	 * Increasing nbatch will not fix it since there's no way to subdivide the
-	 * group any more finely. We have to just gut it out and hope the server
-	 * has enough RAM.
-	 */
-	if (nfreed == 0 || nfreed == ninmemory)
-	{
-		hashtable->growEnabled = false;
-#ifdef HJDEBUG
-		printf("Disabling further increase of nbatch\n");
-#endif
-	}
+    /* CSI3130: batching disabled – do nothing */
+    return;
 }
 
-/*
- * ExecHashTableInsert
- *		insert a tuple into the hash table depending on the hash value
- *		it may just go to a temp file for later batches
- */
+
 void
 ExecHashTableInsert(HashJoinTable hashtable,
 					HeapTuple tuple,
@@ -606,11 +471,9 @@ ExecHashTableInsert(HashJoinTable hashtable,
 	/*
 	 * decide whether to put the tuple in the hash table or a temp file
 	 */
-	if (batchno == hashtable->curbatch)
-	{
-		/*
-		 * put the tuple in hash table
-		 */
+	/* CSI3130: batching disabled - we always use a single in-memory batch.
+	 * batchno should always be 0 and equal to curbatch (also 0) */
+
 		HashJoinTuple hashTuple;
 		int			hashTupleSize;
 
@@ -624,24 +487,18 @@ ExecHashTableInsert(HashJoinTable hashtable,
 		hashTuple->htup.t_datamcxt = hashtable->batchCxt;
 		hashTuple->htup.t_data = (HeapTupleHeader)
 			(((char *) hashTuple) + MAXALIGN(sizeof(HashJoinTupleData)));
+
 		memcpy((char *) hashTuple->htup.t_data,
 			   (char *) tuple->t_data,
 			   tuple->t_len);
+		/* Insert at the head of the bucket's chain */	   
 		hashTuple->next = hashtable->buckets[bucketno];
 		hashtable->buckets[bucketno] = hashTuple;
+		
+		/* CSI3130: We still track spaceUsed, but we no longer create more batches. */
 		hashtable->spaceUsed += hashTupleSize;
-		if (hashtable->spaceUsed > hashtable->spaceAllowed)
-			ExecHashIncreaseNumBatches(hashtable);
-	}
-	else
-	{
-		/*
-		 * put the tuple into a temp file for later batches
-		 */
-		Assert(batchno > hashtable->curbatch);
-		ExecHashJoinSaveTuple(tuple, hashvalue,
-							  &hashtable->innerBatchFile[batchno]);
-	}
+		
+							
 }
 
 /*
@@ -721,6 +578,7 @@ ExecHashGetHashValue(HashJoinTable hashtable,
  * nbatch is always a power of 2; we increase it only by doubling it.  This
  * effectively adds one more bit to the top of the batchno.
  */
+
 void
 ExecHashGetBucketAndBatch(HashJoinTable hashtable,
 						  uint32 hashvalue,
@@ -728,20 +586,12 @@ ExecHashGetBucketAndBatch(HashJoinTable hashtable,
 						  int *batchno)
 {
 	uint32		nbuckets = (uint32) hashtable->nbuckets;
-	uint32		nbatch = (uint32) hashtable->nbatch;
 
-	if (nbatch > 1)
-	{
-		*bucketno = hashvalue % nbuckets;
-		/* since nbatch is a power of 2, can do MOD by masking */
-		*batchno = (hashvalue / nbuckets) & (nbatch - 1);
-	}
-	else
-	{
-		*bucketno = hashvalue % nbuckets;
-		*batchno = 0;
-	}
+	/* CSI3130: multiple batches disabled – there is always exactly one batch. */
+	*bucketno = hashvalue % nbuckets;
+	*batchno  = 0;
 }
+
 
 /*
  * ExecScanHashBucket
