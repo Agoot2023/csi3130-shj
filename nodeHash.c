@@ -608,12 +608,27 @@ ExecScanHashBucket(HashJoinState *hjstate,
 	HashJoinTuple hashTuple = hjstate->hj_CurTuple;
 	uint32		hashvalue = hjstate->hj_CurHashValue;
 
+	// CSI3130: Verify which relation is being probed (inner or outer) and initialize variables accordingly.
+	if (hjstate->probing_inner) {
+		hashtable = hjstate->inner_hj_HashTable;
+		hashTuple = hjstate->inner_hj_CurTuple;
+		hashvalue = hjstate->outer_hj_CurHashValue;
+		bucketNo = hjstate->inner_hj_CurBucketNo;
+		tupleSlot = hjstate->hj_InnerTupleSlot;
+	} else {
+		hashtable = hjstate->outer_hj_HashTable;
+		hashTuple = hjstate->outer_hj_CurTuple;
+		hashvalue = hjstate->inner_hj_CurHashValue;
+		bucketNo = hjstate->outer_hj_CurBucketNo;
+		tupleSlot = hjstate->hj_outerTupleSlot;
+	}
+
 	/*
 	 * hj_CurTuple is NULL to start scanning a new bucket, or the address of
 	 * the last tuple returned from the current bucket.
 	 */
 	if (hashTuple == NULL)
-		hashTuple = hashtable->buckets[hjstate->hj_CurBucketNo];
+		hashTuple = hashtable->buckets[bucketNo]; //CSI3130: We can replace hjstate->hj_CurBucketNo with bucketNo from our new variables.
 	else
 		hashTuple = hashTuple->next;
 
@@ -637,7 +652,7 @@ ExecScanHashBucket(HashJoinState *hjstate,
 			if (ExecQual(hjclauses, econtext, false))
 			{
 				hjstate->hj_CurTuple = hashTuple;
-				return heapTuple;
+				return hashtable;
 			}
 		}
 
