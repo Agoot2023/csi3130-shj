@@ -1113,6 +1113,8 @@ typedef struct HashJoinState
 {
 	JoinState	js;				/* its first field is NodeTag */
 	List	   *hashclauses;	/* list of ExprState nodes */
+
+	/* Standard PostgreSQL hash join state */
 	HashJoinTable hj_HashTable;
 	uint32		hj_CurHashValue;
 	int			hj_CurBucketNo;
@@ -1127,6 +1129,31 @@ typedef struct HashJoinState
 	bool		hj_NeedNewOuter;
 	bool		hj_MatchedOuter;
 	bool		hj_OuterNotEmpty;
+
+	/* CSI3130: Symmetric Hash Join (SHJ) additional state */
+
+	/* CSI3130: Separate hash tables for left (outer) and right (inner) inputs */
+	HashJoinTable hj_Shj_HashTableLeft;
+	HashJoinTable hj_Shj_HashTableRight;
+
+	/* CSI3130: Last tuples fetched from left and right child nodes */
+	TupleTableSlot *hj_Shj_LeftTupleSlot;
+	TupleTableSlot *hj_Shj_RightTupleSlot;
+
+	/* CSI3130: Flags to indicate when each input has reached end-of-stream */
+	bool		hj_Shj_LeftDone;
+	bool		hj_Shj_RightDone;
+
+	/* CSI3130: Which side to pull from next (0 = left, 1 = right) */
+	int			hj_Shj_WhichSide;
+	/* CSI3130: Current scan positions when probing opposite hash tables */
+	HashJoinTuple hj_Shj_CurTupleFromLeft;
+	HashJoinTuple hj_Shj_CurTupleFromRight;
+
+	/* CSI3130: Counters for project-required SHJ statistics */
+	long		hj_Shj_NumMatchesFromLeft;
+	long		hj_Shj_NumMatchesFromRight;
+	bool        hj_Shj_StatsPrinted = false;
 } HashJoinState;
 
 
