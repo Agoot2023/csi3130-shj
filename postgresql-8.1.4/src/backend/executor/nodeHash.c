@@ -12,12 +12,12 @@
  *
  *-------------------------------------------------------------------------
  */
-/*
- * INTERFACE ROUTINES
- *		MultiExecHash	- generate an in-memory hash table of the relation
- *		ExecInitHash	- initialize node and subnodes
- *		ExecEndHash		- shutdown node and subnodes
- */
+ /*
+  * INTERFACE ROUTINES
+  *		MultiExecHash	- generate an in-memory hash table of the relation
+  *		ExecInitHash	- initialize node and subnodes
+  *		ExecEndHash		- shutdown node and subnodes
+  */
 #include "postgres.h"
 
 #include "executor/execdebug.h"
@@ -40,12 +40,72 @@ static void ExecHashIncreaseNumBatches(HashJoinTable hashtable);
  *		stub for pro forma compliance
  * ----------------------------------------------------------------
  */
-TupleTableSlot *
-ExecHash(HashState *node)
+ /*
+ TupleTableSlot *
+ ExecHash(HashState *node)
+ {
+	 elog(ERROR, "Hash node does not support ExecProcNode call convention");
+	 return NULL;
+ }
+ */
+ /*CSI3130 : begin*/
+Node*
+MultiExecHash(HashState* node)
 {
-	elog(ERROR, "Hash node does not support ExecProcNode call convention");
+	PlanState* outerNode;
+	List* hashkeys;
+	HashJoinTable hashtable;
+	TupleTableSlot* slot;
+	ExprContext* econtext;
+	uint32		hashvalue;
+
+	/* must provide our own instrumentation support */
+	if (node->ps.instrument)
+		InstrStartNode(node->ps.instrument);
+
+	/*
+	 * get state info from node
+	 */
+	outerNode = outerPlanState(node);
+	hashtable = node->hashtable;
+
+	/*
+	 * set expression context
+	 */
+	hashkeys = node->hashkeys;
+	econtext = node->ps.ps_ExprContext;
+
+	//  CSI 3130
+	/*
+	 * get all inner tuples and insert into the hash table (or temp files)
+	 */
+	for (;;)
+	{
+		slot = ExecProcNode(outerNode);
+		if (TupIsNull(slot))
+			break;
+		hashtable->totalTuples += 1;
+		econtext->ecxt_innertuple = slot;
+		// CSI 3130: Compute hash value
+		hashvalue = ExecHashGetHashValue(hashtable, econtext, hashkeys);
+		ExecHashTableInsert(hashtable, ExecFetchSlotTuple(slot), hashvalue);
+	}
+
+	/* must provide our own instrumentation support */
+	if (node->ps.instrument)
+		InstrStopNodeMulti(node->ps.instrument, hashtable->totalTuples);
+
+	/*
+	 * We do not return the hash table directly because it's not a subtype of
+	 * Node, and so would violate the MultiExecProcNode API.  Instead, our
+	 * parent Hashjoin node is expected to know how to fish it out of our node
+	 * state.  Ugly but not really worth cleaning up, since Hashjoin knows
+	 * quite a bit more about Hash besides that.
+	 */
 	return NULL;
 }
+
+/*CSI3130 : end */
 
 /* ----------------------------------------------------------------
  *		MultiExecHash
@@ -54,14 +114,14 @@ ExecHash(HashState *node)
  *		than one batch is required.
  * ----------------------------------------------------------------
  */
-Node *
-MultiExecHash(HashState *node)
+TupleTableSlot*
+ExecHash(HashState* node)
 {
-	PlanState  *outerNode;
-	List	   *hashkeys;
+	PlanState* outerNode;
+	List* hashkeys;
 	HashJoinTable hashtable;
-	TupleTableSlot *slot;
-	ExprContext *econtext;
+	TupleTableSlot* slot;
+	ExprContext* econtext;
 	uint32		hashvalue;
 
 	/* must provide our own instrumentation support */
@@ -81,24 +141,26 @@ MultiExecHash(HashState *node)
 	econtext = node->ps.ps_ExprContext;
 
 	/*
-	 * get all inner tuples and insert into the hash table (or temp files)
+	 * get one inner tuples and insert into the hash table (or temp files)
 	 */
-	for (;;)
+
+	slot = ExecProcNode(outerNode);
+	if (!TupIsNull(slot))
 	{
-		slot = ExecProcNode(outerNode);
-		if (TupIsNull(slot))
-			break;
 		hashtable->totalTuples += 1;
 		/* We have to compute the hash value */
 		econtext->ecxt_innertuple = slot;
+		econtext->ecxt_outertuple = slot;	//in case of outer hash table
 		hashvalue = ExecHashGetHashValue(hashtable, econtext, hashkeys);
 		ExecHashTableInsert(hashtable, ExecFetchSlotTuple(slot), hashvalue);
 	}
+	else {
 
-	/* must provide our own instrumentation support */
-	if (node->ps.instrument)
-		InstrStopNodeMulti(node->ps.instrument, hashtable->totalTuples);
-
+		/* must provide our own instrumentation support */
+		if (node->ps.instrument)
+			InstrStopNodeMulti(node->ps.instrument, hashtable->totalTuples);
+		return NULL;
+	}
 	/*
 	 * We do not return the hash table directly because it's not a subtype of
 	 * Node, and so would violate the MultiExecProcNode API.  Instead, our
@@ -106,7 +168,7 @@ MultiExecHash(HashState *node)
 	 * state.  Ugly but not really worth cleaning up, since Hashjoin knows
 	 * quite a bit more about Hash besides that.
 	 */
-	return NULL;
+	return slot;
 }
 
 /* ----------------------------------------------------------------
@@ -115,10 +177,10 @@ MultiExecHash(HashState *node)
  *		Init routine for Hash node
  * ----------------------------------------------------------------
  */
-HashState *
-ExecInitHash(Hash *node, EState *estate)
+HashState*
+ExecInitHash(Hash* node, EState* estate)
 {
-	HashState  *hashstate;
+	HashState* hashstate;
 
 	SO_printf("ExecInitHash: initializing hash node\n");
 
@@ -126,7 +188,7 @@ ExecInitHash(Hash *node, EState *estate)
 	 * create state structure
 	 */
 	hashstate = makeNode(HashState);
-	hashstate->ps.plan = (Plan *) node;
+	hashstate->ps.plan = (Plan*)node;
 	hashstate->ps.state = estate;
 	hashstate->hashtable = NULL;
 	hashstate->hashkeys = NIL;	/* will be set by parent HashJoin */
@@ -148,12 +210,12 @@ ExecInitHash(Hash *node, EState *estate)
 	/*
 	 * initialize child expressions
 	 */
-	hashstate->ps.targetlist = (List *)
-		ExecInitExpr((Expr *) node->plan.targetlist,
-					 (PlanState *) hashstate);
-	hashstate->ps.qual = (List *)
-		ExecInitExpr((Expr *) node->plan.qual,
-					 (PlanState *) hashstate);
+	hashstate->ps.targetlist = (List*)
+		ExecInitExpr((Expr*)node->plan.targetlist,
+			(PlanState*)hashstate);
+	hashstate->ps.qual = (List*)
+		ExecInitExpr((Expr*)node->plan.qual,
+			(PlanState*)hashstate);
 
 	/*
 	 * initialize child nodes
@@ -171,7 +233,7 @@ ExecInitHash(Hash *node, EState *estate)
 }
 
 int
-ExecCountSlotsHash(Hash *node)
+ExecCountSlotsHash(Hash* node)
 {
 	return ExecCountSlotsNode(outerPlan(node)) +
 		ExecCountSlotsNode(innerPlan(node)) +
@@ -185,9 +247,9 @@ ExecCountSlotsHash(Hash *node)
  * ----------------------------------------------------------------
  */
 void
-ExecEndHash(HashState *node)
+ExecEndHash(HashState* node)
 {
-	PlanState  *outerPlan;
+	PlanState* outerPlan;
 
 	/*
 	 * free exprcontext
@@ -209,15 +271,15 @@ ExecEndHash(HashState *node)
  * ----------------------------------------------------------------
  */
 HashJoinTable
-ExecHashTableCreate(Hash *node, List *hashOperators)
+ExecHashTableCreate(Hash* node, List* hashOperators)
 {
 	HashJoinTable hashtable;
-	Plan	   *outerNode;
+	Plan* outerNode;
 	int			nbuckets;
 	int			nbatch;
 	int			nkeys;
 	int			i;
-	ListCell   *ho;
+	ListCell* ho;
 	MemoryContext oldcxt;
 
 	/*
@@ -228,7 +290,7 @@ ExecHashTableCreate(Hash *node, List *hashOperators)
 	outerNode = outerPlan(node);
 
 	ExecChooseHashTableSize(outerNode->plan_rows, outerNode->plan_width,
-							&nbuckets, &nbatch);
+		&nbuckets, &nbatch);
 
 #ifdef HJDEBUG
 	printf("nbatch = %d, nbuckets = %d\n", nbatch, nbuckets);
@@ -240,14 +302,15 @@ ExecHashTableCreate(Hash *node, List *hashOperators)
 	 * The hashtable control block is just palloc'd from the executor's
 	 * per-query memory context.
 	 */
-	hashtable = (HashJoinTable) palloc(sizeof(HashJoinTableData));
+	hashtable = (HashJoinTable)palloc(sizeof(HashJoinTableData));
 	hashtable->nbuckets = nbuckets;
 	hashtable->buckets = NULL;
 	hashtable->nbatch = nbatch;
 	hashtable->curbatch = 0;
 	hashtable->nbatch_original = nbatch;
 	hashtable->nbatch_outstart = nbatch;
-	hashtable->growEnabled = true;
+	hashtable->growEnabled = false;
+	//hashtable->growEnabled = true; // CSI 3130: Disable use of multiple batches
 	hashtable->totalTuples = 0;
 	hashtable->innerBatchFile = NULL;
 	hashtable->outerBatchFile = NULL;
@@ -258,7 +321,7 @@ ExecHashTableCreate(Hash *node, List *hashOperators)
 	 * Get info about the hash functions to be used for each hash key.
 	 */
 	nkeys = list_length(hashOperators);
-	hashtable->hashfunctions = (FmgrInfo *) palloc(nkeys * sizeof(FmgrInfo));
+	hashtable->hashfunctions = (FmgrInfo*)palloc(nkeys * sizeof(FmgrInfo));
 	i = 0;
 	foreach(ho, hashOperators)
 	{
@@ -267,7 +330,7 @@ ExecHashTableCreate(Hash *node, List *hashOperators)
 		hashfn = get_op_hash_function(lfirst_oid(ho));
 		if (!OidIsValid(hashfn))
 			elog(ERROR, "could not find hash function for hash operator %u",
-				 lfirst_oid(ho));
+				lfirst_oid(ho));
 		fmgr_info(hashfn, &hashtable->hashfunctions[i]);
 		i++;
 	}
@@ -277,16 +340,16 @@ ExecHashTableCreate(Hash *node, List *hashOperators)
 	 * storage.  See notes in executor/hashjoin.h.
 	 */
 	hashtable->hashCxt = AllocSetContextCreate(CurrentMemoryContext,
-											   "HashTableContext",
-											   ALLOCSET_DEFAULT_MINSIZE,
-											   ALLOCSET_DEFAULT_INITSIZE,
-											   ALLOCSET_DEFAULT_MAXSIZE);
+		"HashTableContext",
+		ALLOCSET_DEFAULT_MINSIZE,
+		ALLOCSET_DEFAULT_INITSIZE,
+		ALLOCSET_DEFAULT_MAXSIZE);
 
 	hashtable->batchCxt = AllocSetContextCreate(hashtable->hashCxt,
-												"HashBatchContext",
-												ALLOCSET_DEFAULT_MINSIZE,
-												ALLOCSET_DEFAULT_INITSIZE,
-												ALLOCSET_DEFAULT_MAXSIZE);
+		"HashBatchContext",
+		ALLOCSET_DEFAULT_MINSIZE,
+		ALLOCSET_DEFAULT_INITSIZE,
+		ALLOCSET_DEFAULT_MAXSIZE);
 
 	/* Allocate data that will live for the life of the hashjoin */
 
@@ -297,10 +360,10 @@ ExecHashTableCreate(Hash *node, List *hashOperators)
 		/*
 		 * allocate and initialize the file arrays in hashCxt
 		 */
-		hashtable->innerBatchFile = (BufFile **)
-			palloc0(nbatch * sizeof(BufFile *));
-		hashtable->outerBatchFile = (BufFile **)
-			palloc0(nbatch * sizeof(BufFile *));
+		hashtable->innerBatchFile = (BufFile**)
+			palloc0(nbatch * sizeof(BufFile*));
+		hashtable->outerBatchFile = (BufFile**)
+			palloc0(nbatch * sizeof(BufFile*));
 		/* The files will not be opened until needed... */
 	}
 
@@ -310,7 +373,7 @@ ExecHashTableCreate(Hash *node, List *hashOperators)
 	 */
 	MemoryContextSwitchTo(hashtable->batchCxt);
 
-	hashtable->buckets = (HashJoinTuple *)
+	hashtable->buckets = (HashJoinTuple*)
 		palloc0(nbuckets * sizeof(HashJoinTuple));
 
 	MemoryContextSwitchTo(oldcxt);
@@ -326,7 +389,7 @@ ExecHashTableCreate(Hash *node, List *hashOperators)
  * This is exported so that the planner's costsize.c can use it.
  */
 
-/* Target bucket loading (tuples per bucket) */
+ /* Target bucket loading (tuples per bucket) */
 #define NTUP_PER_BUCKET			10
 
 /* Prime numbers that we like to use as nbuckets values */
@@ -338,8 +401,8 @@ static const int hprimes[] = {
 
 void
 ExecChooseHashTableSize(double ntuples, int tupwidth,
-						int *numbuckets,
-						int *numbatches)
+	int* numbuckets,
+	int* numbatches)
 {
 	int			tupsize;
 	double		inner_rel_bytes;
@@ -381,11 +444,11 @@ ExecChooseHashTableSize(double ntuples, int tupwidth,
 
 		lbuckets = (hash_table_bytes / tupsize) / NTUP_PER_BUCKET;
 		lbuckets = Min(lbuckets, INT_MAX);
-		nbuckets = (int) lbuckets;
+		nbuckets = (int)lbuckets;
 
 		dbatch = ceil(inner_rel_bytes / hash_table_bytes);
 		dbatch = Min(dbatch, INT_MAX / 2);
-		minbatch = (int) dbatch;
+		minbatch = (int)dbatch;
 		nbatch = 2;
 		while (nbatch < minbatch)
 			nbatch <<= 1;
@@ -397,7 +460,7 @@ ExecChooseHashTableSize(double ntuples, int tupwidth,
 
 		dbuckets = ceil(ntuples / NTUP_PER_BUCKET);
 		dbuckets = Min(dbuckets, INT_MAX);
-		nbuckets = (int) dbuckets;
+		nbuckets = (int)dbuckets;
 
 		nbatch = 1;
 	}
@@ -409,7 +472,7 @@ ExecChooseHashTableSize(double ntuples, int tupwidth,
 	 * nbuckets is not very small, by the simple expedient of not putting any
 	 * very small entries in hprimes[].)
 	 */
-	for (i = 0; i < (int) lengthof(hprimes); i++)
+	for (i = 0; i < (int)lengthof(hprimes); i++)
 	{
 		if (hprimes[i] >= nbuckets)
 		{
@@ -483,7 +546,7 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 
 #ifdef HJDEBUG
 	printf("Increasing nbatch to %d because space = %lu\n",
-		   nbatch, (unsigned long) hashtable->spaceUsed);
+		nbatch, (unsigned long)hashtable->spaceUsed);
 #endif
 
 	oldcxt = MemoryContextSwitchTo(hashtable->hashCxt);
@@ -491,22 +554,22 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 	if (hashtable->innerBatchFile == NULL)
 	{
 		/* we had no file arrays before */
-		hashtable->innerBatchFile = (BufFile **)
-			palloc0(nbatch * sizeof(BufFile *));
-		hashtable->outerBatchFile = (BufFile **)
-			palloc0(nbatch * sizeof(BufFile *));
+		hashtable->innerBatchFile = (BufFile**)
+			palloc0(nbatch * sizeof(BufFile*));
+		hashtable->outerBatchFile = (BufFile**)
+			palloc0(nbatch * sizeof(BufFile*));
 	}
 	else
 	{
 		/* enlarge arrays and zero out added entries */
-		hashtable->innerBatchFile = (BufFile **)
-			repalloc(hashtable->innerBatchFile, nbatch * sizeof(BufFile *));
-		hashtable->outerBatchFile = (BufFile **)
-			repalloc(hashtable->outerBatchFile, nbatch * sizeof(BufFile *));
+		hashtable->innerBatchFile = (BufFile**)
+			repalloc(hashtable->innerBatchFile, nbatch * sizeof(BufFile*));
+		hashtable->outerBatchFile = (BufFile**)
+			repalloc(hashtable->outerBatchFile, nbatch * sizeof(BufFile*));
 		MemSet(hashtable->innerBatchFile + oldnbatch, 0,
-			   (nbatch - oldnbatch) * sizeof(BufFile *));
+			(nbatch - oldnbatch) * sizeof(BufFile*));
 		MemSet(hashtable->outerBatchFile + oldnbatch, 0,
-			   (nbatch - oldnbatch) * sizeof(BufFile *));
+			(nbatch - oldnbatch) * sizeof(BufFile*));
 	}
 
 	MemoryContextSwitchTo(oldcxt);
@@ -536,7 +599,7 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 
 			ninmemory++;
 			ExecHashGetBucketAndBatch(hashtable, tuple->hashvalue,
-									  &bucketno, &batchno);
+				&bucketno, &batchno);
 			Assert(bucketno == i);
 			if (batchno == curbatch)
 			{
@@ -548,7 +611,7 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 				/* dump it out */
 				Assert(batchno > curbatch);
 				ExecHashJoinSaveTuple(&tuple->htup, tuple->hashvalue,
-									  &hashtable->innerBatchFile[batchno]);
+					&hashtable->innerBatchFile[batchno]);
 				/* and remove from hash table */
 				if (prevtuple)
 					prevtuple->next = nexttuple;
@@ -567,7 +630,7 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 
 #ifdef HJDEBUG
 	printf("Freed %ld of %ld tuples, space now %lu\n",
-		   nfreed, ninmemory, (unsigned long) hashtable->spaceUsed);
+		nfreed, ninmemory, (unsigned long)hashtable->spaceUsed);
 #endif
 
 	/*
@@ -594,14 +657,14 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
  */
 void
 ExecHashTableInsert(HashJoinTable hashtable,
-					HeapTuple tuple,
-					uint32 hashvalue)
+	HeapTuple tuple,
+	uint32 hashvalue)
 {
 	int			bucketno;
 	int			batchno;
 
 	ExecHashGetBucketAndBatch(hashtable, hashvalue,
-							  &bucketno, &batchno);
+		&bucketno, &batchno);
 
 	/*
 	 * decide whether to put the tuple in the hash table or a temp file
@@ -615,18 +678,18 @@ ExecHashTableInsert(HashJoinTable hashtable,
 		int			hashTupleSize;
 
 		hashTupleSize = MAXALIGN(sizeof(HashJoinTupleData)) + tuple->t_len;
-		hashTuple = (HashJoinTuple) MemoryContextAlloc(hashtable->batchCxt,
-													   hashTupleSize);
+		hashTuple = (HashJoinTuple)MemoryContextAlloc(hashtable->batchCxt,
+			hashTupleSize);
 		hashTuple->hashvalue = hashvalue;
-		memcpy((char *) &hashTuple->htup,
-			   (char *) tuple,
-			   sizeof(hashTuple->htup));
+		memcpy((char*)&hashTuple->htup,
+			(char*)tuple,
+			sizeof(hashTuple->htup));
 		hashTuple->htup.t_datamcxt = hashtable->batchCxt;
 		hashTuple->htup.t_data = (HeapTupleHeader)
-			(((char *) hashTuple) + MAXALIGN(sizeof(HashJoinTupleData)));
-		memcpy((char *) hashTuple->htup.t_data,
-			   (char *) tuple->t_data,
-			   tuple->t_len);
+			(((char*)hashTuple) + MAXALIGN(sizeof(HashJoinTupleData)));
+		memcpy((char*)hashTuple->htup.t_data,
+			(char*)tuple->t_data,
+			tuple->t_len);
 		hashTuple->next = hashtable->buckets[bucketno];
 		hashtable->buckets[bucketno] = hashTuple;
 		hashtable->spaceUsed += hashTupleSize;
@@ -640,7 +703,7 @@ ExecHashTableInsert(HashJoinTable hashtable,
 		 */
 		Assert(batchno > hashtable->curbatch);
 		ExecHashJoinSaveTuple(tuple, hashvalue,
-							  &hashtable->innerBatchFile[batchno]);
+			&hashtable->innerBatchFile[batchno]);
 	}
 }
 
@@ -654,11 +717,11 @@ ExecHashTableInsert(HashJoinTable hashtable,
  */
 uint32
 ExecHashGetHashValue(HashJoinTable hashtable,
-					 ExprContext *econtext,
-					 List *hashkeys)
+	ExprContext* econtext,
+	List* hashkeys)
 {
 	uint32		hashkey = 0;
-	ListCell   *hk;
+	ListCell* hk;
 	int			i = 0;
 	MemoryContext oldContext;
 
@@ -672,7 +735,7 @@ ExecHashGetHashValue(HashJoinTable hashtable,
 
 	foreach(hk, hashkeys)
 	{
-		ExprState  *keyexpr = (ExprState *) lfirst(hk);
+		ExprState* keyexpr = (ExprState*)lfirst(hk);
 		Datum		keyval;
 		bool		isNull;
 
@@ -692,7 +755,7 @@ ExecHashGetHashValue(HashJoinTable hashtable,
 			uint32		hkey;
 
 			hkey = DatumGetUInt32(FunctionCall1(&hashtable->hashfunctions[i],
-												keyval));
+				keyval));
 			hashkey ^= hkey;
 		}
 
@@ -723,14 +786,14 @@ ExecHashGetHashValue(HashJoinTable hashtable,
  */
 void
 ExecHashGetBucketAndBatch(HashJoinTable hashtable,
-						  uint32 hashvalue,
-						  int *bucketno,
-						  int *batchno)
+	uint32 hashvalue,
+	int* bucketno,
+	int* batchno)
 {
-	uint32		nbuckets = (uint32) hashtable->nbuckets;
-	uint32		nbatch = (uint32) hashtable->nbatch;
+	uint32		nbuckets = (uint32)hashtable->nbuckets;
+	uint32		nbatch = (uint32)hashtable->nbatch;
 
-	if (nbatch > 1)
+	if (false && nbatch > 1)
 	{
 		*bucketno = hashvalue % nbuckets;
 		/* since nbatch is a power of 2, can do MOD by masking */
@@ -749,56 +812,250 @@ ExecHashGetBucketAndBatch(HashJoinTable hashtable,
  *
  * The current outer tuple must be stored in econtext->ecxt_outertuple.
  */
-HeapTuple
-ExecScanHashBucket(HashJoinState *hjstate,
-				   ExprContext *econtext)
-{
-	List	   *hjclauses = hjstate->hashclauses;
-	HashJoinTable hashtable = hjstate->hj_HashTable;
-	HashJoinTuple hashTuple = hjstate->hj_CurTuple;
-	uint32		hashvalue = hjstate->hj_CurHashValue;
 
-	/*
+ // CSI 3130: Implemented both probing inner and probing outer in ExecScanHashBucket rather than as two seperate methods.
+ // Method returns the HeapTuple assigned to the curtuple in nodeHashJoin
+ // This prevents server from crashing when checking for repeated tuples in nodeHashJoin 
+HeapTuple
+ExecScanHashBucket(HashJoinState* hjstate,
+	ExprContext* econtext) {
+	//CSI3130
+	// if (hjstate->hj_InFetched) { //CSI3130
+	//     List *hjclauses = hjstate->hashclauses;
+	//     HashJoinTable hashtable = hjstate->hj_OutHashTable;
+	//     HashJoinTuple hashTuple = hjstate->hj_OutCurTuple;
+	//     uint32 hashvalue = hjstate->hj_InCurHashValue;
+
+// 	List	   *hjclauses = hjstate->hashclauses;
+// 	HashJoinTable hashtable = hjstate->inner_hj_HashTable;
+// 	HashJoinTuple hashTuple = hjstate->inner_hj_CurTuple;
+// 	uint32		hashvalue = hjstate->outer_hj_CurHashValue;
+
+	// CSI3130: probing inner
+	//if (hjstate->probing_inner) { //CSI3130
+	List* hjclauses = hjstate->hashclauses;
+
+	if ((hjstate->isNextFetchInner)) { //CSI3130 - check if the next fetch is inner
+		// CSI 3130: Set hashtable. hashTuple, and hashvalue
+		HashJoinTable hashtable = hjstate->inner_hj_HashTable;
+		HashJoinTuple hashTuple = hjstate->inner_hj_CurTuple;
+		uint32 hashvalue = hjstate->outer_hj_CurHashValue;
+		//bucketNo = hjstate->inner_hj_CurBucketNo;
+		//tupleSlot = hjstate->hj_InnerTupleSlot
+
+				/*
+		* CSI3130: Scanning inner bucket
+		 hj_CurTuple is NULL to start scanning a new bucket, or the address of
+		* the last tuple returned from the current bucket.
+		*/
+		if (hashTuple == NULL)
+			hashTuple = hashtable->buckets[hjstate->inner_hj_CurBucketNo];
+		else
+			hashTuple = hashTuple->next;
+
+		// CSI3130: While the next hashTuple isn't null 
+		while (hashTuple != NULL)
+		{
+			if (hashTuple->hashvalue == hashvalue)
+			{
+				HeapTuple	heapTuple = &hashTuple->htup;
+				TupleTableSlot* inntuple;
+
+				/* insert hashtable's tuple into exec slot so ExecQual sees it */
+				inntuple = ExecStoreTuple(heapTuple,
+					hjstate->inner_hj_HashTupleSlot,
+					InvalidBuffer,
+					false);	/* do not pfree */
+				econtext->ecxt_innertuple = inntuple;
+
+				/* reset temp memory each time to avoid leaks from qual expr */
+				ResetExprContext(econtext);
+
+				//			printf("outer attrs in probeouter =%d\n",hjstate->inner_hj_HashTupleSlot->tts_tupleDescriptor->natts);
+
+				if (ExecQual(hjclauses, econtext, false))
+				{
+					hjstate->inner_hj_CurTuple = hashTuple;
+					return heapTuple;
+				}
+			}
+
+			hashTuple = hashTuple->next;
+		}
+
+		/*
+		 * no match
+		 */
+		return NULL;
+
+		// CSI 3130: probing outer
+	}
+	else {
+		HashJoinTable hashtable = hjstate->outer_hj_HashTable;
+		HashJoinTuple hashTuple = hjstate->outer_hj_CurTuple;
+		uint32 hashvalue = hjstate->inner_hj_CurHashValue;
+		//bucketNo = hjstate->outer_hj_CurBucketNo;
+		//tupleSlot = hjstate->hj_OuterupleSlot
+
+		// CSI3130: Scanning outer bucket
+		/*
 	 * hj_CurTuple is NULL to start scanning a new bucket, or the address of
 	 * the last tuple returned from the current bucket.
 	 */
-	if (hashTuple == NULL)
-		hashTuple = hashtable->buckets[hjstate->hj_CurBucketNo];
-	else
-		hashTuple = hashTuple->next;
+		if (hashTuple == NULL)
+			hashTuple = hashtable->buckets[hjstate->outer_hj_CurBucketNo];
+		else
+			hashTuple = hashTuple->next;
 
-	while (hashTuple != NULL)
-	{
-		if (hashTuple->hashvalue == hashvalue)
+		while (hashTuple != NULL)
 		{
-			HeapTuple	heapTuple = &hashTuple->htup;
-			TupleTableSlot *inntuple;
-
-			/* insert hashtable's tuple into exec slot so ExecQual sees it */
-			inntuple = ExecStoreTuple(heapTuple,
-									  hjstate->hj_HashTupleSlot,
-									  InvalidBuffer,
-									  false);	/* do not pfree */
-			econtext->ecxt_innertuple = inntuple;
-
-			/* reset temp memory each time to avoid leaks from qual expr */
-			ResetExprContext(econtext);
-
-			if (ExecQual(hjclauses, econtext, false))
+			if (hashTuple->hashvalue == hashvalue)
 			{
-				hjstate->hj_CurTuple = hashTuple;
-				return heapTuple;
+				HeapTuple	heapTuple = &hashTuple->htup;
+				TupleTableSlot* outtuple;
+
+				/* insert hashtable's tuple into exec slot so ExecQual sees it */
+
+				outtuple = ExecStoreTuple(heapTuple,
+					hjstate->outer_hj_HashTupleSlot,
+					InvalidBuffer,
+					false);	// do not pfree 
+				econtext->ecxt_outertuple = outtuple;
+
+				/* reset temp memory each time to avoid leaks from qual expr */
+				ResetExprContext(econtext);
+
+
+				//			printf("outer attrs in probeouter =%d\n",hjstate->inner_hj_HashTupleSlot->tts_tupleDescriptor->natts);
+
+				if (ExecQual(hjclauses, econtext, false))
+				{
+					hjstate->outer_hj_CurTuple = hashTuple;
+					return heapTuple;
+				}
 			}
+
+			hashTuple = hashTuple->next;
 		}
 
-		hashTuple = hashTuple->next;
+		/*
+		* no match
+		*/
+		return NULL;
 	}
-
-	/*
-	 * no match
-	 */
-	return NULL;
 }
+
+
+
+
+
+// HeapTuple
+// ExecScanHashBucket_probeouter(HashJoinState *hjstate,
+// 				   ExprContext *econtext)
+// {
+// 	List	   *hjclauses = hjstate->hashclauses;
+// 	HashJoinTable hashtable = hjstate->outer_hj_HashTable;
+// 	HashJoinTuple hashTuple = hjstate->outer_hj_CurTuple;
+// 	uint32		hashvalue = hjstate->inner_hj_CurHashValue;
+
+// 	/*
+// 	 * hj_CurTuple is NULL to start scanning a new bucket, or the address of
+// 	 * the last tuple returned from the current bucket.
+// 	 */
+// 	if (hashTuple == NULL)
+// 		hashTuple = hashtable->buckets[hjstate->outer_hj_CurBucketNo];
+// 	else
+// 		hashTuple = hashTuple->next;
+
+// 	while (hashTuple != NULL)
+// 	{
+// 		if (hashTuple->hashvalue == hashvalue)
+// 		{
+// 			HeapTuple	heapTuple = &hashTuple->htup;
+// 			TupleTableSlot *outtuple;
+
+// 			/* insert hashtable's tuple into exec slot so ExecQual sees it */
+
+// 			outtuple = ExecStoreTuple(heapTuple,
+// 									  hjstate->outer_hj_HashTupleSlot,
+// 									  InvalidBuffer,
+// 									  false);	// do not pfree 
+// 			econtext->ecxt_outertuple = outtuple;
+
+// 			/* reset temp memory each time to avoid leaks from qual expr */
+// 			ResetExprContext(econtext);
+
+
+// //			printf("outer attrs in probeouter =%d\n",hjstate->inner_hj_HashTupleSlot->tts_tupleDescriptor->natts);
+
+// 			if (ExecQual(hjclauses, econtext, false))
+// 			{
+// 				hjstate->outer_hj_CurTuple = hashTuple;
+// 				return heapTuple;
+// 			}
+// 		}
+
+// 		hashTuple = hashTuple->next;
+// 	}
+
+// 	/*
+// 	 * no match
+// 	 */
+// 	return NULL;
+// }
+
+// HeapTuple
+// ExecScanHashBucket_probeinner(HashJoinState *hjstate,
+// 				   ExprContext *econtext)
+// {
+// 	List	   *hjclauses = hjstate->hashclauses;
+// 	HashJoinTable hashtable = hjstate->inner_hj_HashTable;
+// 	HashJoinTuple hashTuple = hjstate->inner_hj_CurTuple;
+// 	uint32		hashvalue = hjstate->outer_hj_CurHashValue;
+
+// 	/*
+// 	 * hj_CurTuple is NULL to start scanning a new bucket, or the address of
+// 	 * the last tuple returned from the current bucket.
+// 	 */
+// 	if (hashTuple == NULL)
+// 		hashTuple = hashtable->buckets[hjstate->inner_hj_CurBucketNo];
+// 	else
+// 		hashTuple = hashTuple->next;
+
+// 	while (hashTuple != NULL)
+// 	{
+// 		if (hashTuple->hashvalue == hashvalue)
+// 		{
+// 			HeapTuple	heapTuple = &hashTuple->htup;
+// 			TupleTableSlot *inntuple;
+
+// 			/* insert hashtable's tuple into exec slot so ExecQual sees it */
+// 			inntuple = ExecStoreTuple(heapTuple,
+// 									  hjstate->inner_hj_HashTupleSlot,
+// 									  InvalidBuffer,
+// 									  false);	/* do not pfree */
+// 			econtext->ecxt_innertuple = inntuple;
+
+// 			/* reset temp memory each time to avoid leaks from qual expr */
+// 			ResetExprContext(econtext);
+
+// //			printf("outer attrs in probeouter =%d\n",hjstate->inner_hj_HashTupleSlot->tts_tupleDescriptor->natts);
+
+// 			if (ExecQual(hjclauses, econtext, false))
+// 			{
+// 				hjstate->inner_hj_CurTuple = hashTuple;
+// 				return heapTuple;
+// 			}
+// 		}
+
+// 		hashTuple = hashTuple->next;
+// 	}
+
+// 	/*
+// 	 * no match
+// 	 */
+// 	return NULL;
+// }
 
 /*
  * ExecHashTableReset
@@ -819,7 +1076,7 @@ ExecHashTableReset(HashJoinTable hashtable)
 	oldcxt = MemoryContextSwitchTo(hashtable->batchCxt);
 
 	/* Reallocate and reinitialize the hash bucket headers. */
-	hashtable->buckets = (HashJoinTuple *)
+	hashtable->buckets = (HashJoinTuple*)
 		palloc0(nbuckets * sizeof(HashJoinTuple));
 
 	hashtable->spaceUsed = 0;
@@ -828,12 +1085,12 @@ ExecHashTableReset(HashJoinTable hashtable)
 }
 
 void
-ExecReScanHash(HashState *node, ExprContext *exprCtxt)
+ExecReScanHash(HashState* node, ExprContext* exprCtxt)
 {
 	/*
 	 * if chgParam of subnode is not null then plan will be re-scanned by
 	 * first ExecProcNode.
 	 */
-	if (((PlanState *) node)->lefttree->chgParam == NULL)
-		ExecReScan(((PlanState *) node)->lefttree, exprCtxt);
+	if (((PlanState*)node)->lefttree->chgParam == NULL)
+		ExecReScan(((PlanState*)node)->lefttree, exprCtxt);
 }
