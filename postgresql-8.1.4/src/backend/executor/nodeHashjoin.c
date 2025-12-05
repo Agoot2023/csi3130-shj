@@ -513,7 +513,7 @@ ExecHashJoin(HashJoinState *node)		/*CSI3130: altered for inner and outer hashin
             {
                 /* end of join */
                 //return NULL;
-            }
+            //}
 
             /*node->js.ps.ps_OuterTupleSlot = outerTupleSlot;
             econtext->ecxt_outertuple = outerTupleSlot;
@@ -540,7 +540,7 @@ ExecHashJoin(HashJoinState *node)		/*CSI3130: altered for inner and outer hashin
                 node->hj_NeedNewOuter = true;
                 continue;
             }
-        */}
+        *///}
 
         /*
          * Scan hash bucket for matches
@@ -862,7 +862,7 @@ ExecEndHashJoin(HashJoinState* node)
 	 */
 	ExecEndNode(outerPlanState(node));
 	ExecEndNode(innerPlanState(node));
-
+}
 /*
  * ExecHashJoinOuterGetTuple
  *
@@ -874,6 +874,7 @@ ExecEndHashJoin(HashJoinState* node)
  * hash value is stored at *hashvalue --- this is either originally computed,
  * or re-read from the temp file.
  */
+
 
 static TupleTableSlot *
 ExecHashJoinOuterGetTuple(PlanState *outerNode,
