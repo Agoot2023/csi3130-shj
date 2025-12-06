@@ -281,7 +281,7 @@ ExecHashJoin(HashJoinState *node)		/*CSI3130: altered for inner and outer hashin
 			ExprContext *econtext = node->js.ps.ps_ExprContext;
 			econtext->ecxt_innertuple = node->js.ps.ps_InnerTupleSlot;
 			
-			curtuple = ExecScanHashBucket_probeouter(node, econtext);
+			curtuple = ExecScanHashBucket(node, econtext);
 			if (curtuple == NULL)
 				break;		
 //printf("got <initial> result by probing outer hash table\n");			
@@ -333,7 +333,7 @@ ExecHashJoin(HashJoinState *node)		/*CSI3130: altered for inner and outer hashin
 			ExprContext *econtext = node->js.ps.ps_ExprContext;
 			econtext->ecxt_outertuple = node->js.ps.ps_OuterTupleSlot;
 			
-			curtuple = ExecScanHashBucket_probeinner(node, econtext);
+			curtuple = ExecScanHashBucket(node, econtext);
 			if (curtuple == NULL)
 				break;			/* out of matches */
 
